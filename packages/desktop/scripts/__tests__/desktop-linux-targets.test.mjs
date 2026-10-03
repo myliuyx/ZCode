@@ -10,7 +10,10 @@ test("未设置 ZCODE_DESKTOP_LINUX_TARGETS 时返回 null，保持配置默认 
     null,
   );
   assert.equal(
-    resolveLinuxBuilderTargets({ os: "linux", env: { ZCODE_DESKTOP_LINUX_TARGETS: "   " } }),
+    resolveLinuxBuilderTargets({
+      os: "linux",
+      env: { ZCODE_DESKTOP_LINUX_TARGETS: "   " },
+    }),
     null,
   );
 });
@@ -38,7 +41,10 @@ test("忽略空片段，避免拼出多余的位置参数", () => {
 test("非 linux 平台忽略该环境变量，不静默改动 mac/win 产物", () => {
   for (const os of ["mac", "win"]) {
     assert.equal(
-      resolveLinuxBuilderTargets({ os, env: { ZCODE_DESKTOP_LINUX_TARGETS: "AppImage,deb" } }),
+      resolveLinuxBuilderTargets({
+        os,
+        env: { ZCODE_DESKTOP_LINUX_TARGETS: "AppImage,deb" },
+      }),
       null,
     );
   }

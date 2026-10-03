@@ -713,10 +713,10 @@ async function main() {
     "--config",
     "electron-builder.config.js",
     osBuilderFlagMap[os],
-    archBuilderFlagMap[arch],
-    // electron-builder 的 target 位置参数紧跟平台/架构参数。
-    // 不覆盖时保持原样，避免改变既有命令与日志。
+    // electron-builder 的 target 列表是平台 flag 的“值”，必须紧跟平台 flag：
+    // 写成 --linux --x64 AppImage 会让 yargs 把 AppImage 当成未知选项并直接报错退出。
     ...(linuxTargets ?? []),
+    archBuilderFlagMap[arch],
   ];
 
   console.log(`[bundle] target=${os}/${arch}`);
