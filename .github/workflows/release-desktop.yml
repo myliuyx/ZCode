@@ -2,15 +2,25 @@ name: Release Desktop
 
 # 手动触发的桌面安装包构建：macOS / Windows / Linux 三平台并行出包。
 #
-# 只产出构建产物并上传为 Actions artifact，不发布 Release：
-# electron-builder.config.js 的 publish.url 在开源仓库里是占位地址
-# （http://localhost:8081），自动更新链路在 fork 里不可用，
-# 强行发 Release 只会产出指向死链的安装包。
+# 产物先传为 Actions artifact；publish_release 默认开启，会额外创建
+# 一个 draft Release（三平台全绿后才创建）。
+#
+# 关于 electron-builder.config.js 里的 publish.url：
+# 它只是打包时给 electron-builder 的 generic provider 占位（http://localhost:8081），
+# 运行时并不会读取——autoUpdater.ts 的 resolveUpdateFeedSourceFromStartupConfig
+# 在 app.isPackaged 时直接忽略本地覆盖，正式包的更新源由服务端下发的 manifest 决定。
+# 因此往 GitHub Releases 发布安装包不会把自动更新指向这个占位地址。
 
 on:
   # 只保留手动触发：产物是完整安装包，自动 push 触发没有对应场景，
   # 也会把 fork 里的 Actions 额度消耗在无意义的重复构建上。
   workflow_dispatch:
+    inputs:
+      publish_release:
+        description: "创建 GitHub Release（draft，需手动发布）"
+        required: false
+        type: boolean
+        default: true
 
 concurrency:
   # 同一分支不允许并发构建：产物共用 packages/desktop/dist，矩阵并行会互相覆盖。
@@ -18,7 +28,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   bundle:
@@ -139,3 +149,101 @@ jobs:
             packages/desktop/dist/*.exe
             packages/desktop/dist/*.AppImage
             packages/desktop/dist/*.deb
+
+  # 三个平台全部成功后才创建 Release；任一平台失败则不会产生半成品 Release。
+  publish-release:
+    name: Publish GitHub Release
+    needs: bundle
+    if: ${{ inputs.publish_release }}
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # tag 跟随根 package.json 版本，不在 workflow 里硬编码版本号。
+      - name: Resolve version
+        id: version
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Download installers
+        uses: actions/download-artifact@v4
+        with:
+          path: installers
+          merge-multiple: true
+
+      - name: List collected files
+        run: |
+          find installers -type f -printf '%f\t%s\n' | sort
+          count=$(find installers -type f | wc -l)
+          if [ "$count" -lt 4 ]; then
+            echo "expected at least 4 installers (dmg+zip+exe+AppImage+deb), got $count" >&2
+            exit 1
+          fi
+
+      # 说明正文放在仓库里维护，避免把 markdown 嵌在 YAML 里难以校对；
+      # 占位符在构建时用真实版本/commit 替换。
+      - name: Render release notes
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          COMMIT_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          sed -e "s|\$VERSION|$VERSION|g" \
+              -e "s|\$COMMIT_SHA|$COMMIT_SHA|g" \
+              -e "s|\$RUN_ID|$RUN_ID|g" \
+              .github/release-notes.md > installers/README.md
+          head -5 installers/README.md
+
+      # 先建 draft：构建产物需要人工确认后再发布，避免半成品挂到 Releases 页。
+      # tag 已存在时不报错，沿用既有 tag 更新 Release（支持版本号不变时重跑）。
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          assets=(installers/*.dmg installers/*.zip installers/*.exe installers/*.AppImage installers/*.deb)
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "no installer assets found under installers/" >&2
+            exit 1
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release for $TAG already exists, updating it"
+            gh release upload "$TAG" "${assets[@]}" --clobber
+            gh release edit "$TAG" --notes-file installers/README.md
+          else
+            gh release create "$TAG" \
+              --title "ZCode $TAG" \
+              --notes-file installers/README.md \
+              --draft \
+              "${assets[@]}"
+          fi
+
+      - name: Publish release
+        if: ${{ vars.ZCODE_DRAFT_RELEASE == '1' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v${{ steps.version.outputs.version }}
+        run: gh release edit "$TAG" --draft=false
+
+      - name: Summary
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          {
+            echo "### Release \`$TAG\`"
+            echo
+            echo "| File | Size |"
+            echo "| --- | --- |"
+            for f in installers/*.dmg installers/*.zip installers/*.exe installers/*.AppImage installers/*.deb; do
+              [ -f "$f" ] || continue
+              printf '| `%s` | %s MiB |\n' "$(basename "$f")" "$(( $(stat -c%s "$f") / 1024 / 1024 ))"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
