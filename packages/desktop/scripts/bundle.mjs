@@ -23,6 +23,7 @@ import {
   runCommandAndReadStdout,
 } from "../../../scripts/spawn-command.mjs";
 import { resolveIntranetDepsBaseUrl } from "../../../scripts/intranetDefaults.mjs";
+import { resolveLinuxBuilderTargets } from "./desktop-linux-targets.mjs";
 
 const desktopRoot = resolve(import.meta.dirname, "..");
 const workspaceRoot = resolve(desktopRoot, "../..");
@@ -262,6 +263,8 @@ function printHelp() {
 环境变量:
   ZCODE_TARGET_OS              与 --os 等价
   ZCODE_TARGET_ARCH            与 --arch 等价
+  ZCODE_DESKTOP_LINUX_TARGETS  收窄 Linux 打包 target，逗号分隔，如 AppImage,deb；
+                               仅在 --os linux 时生效，其他平台忽略
 `);
 }
 
@@ -703,6 +706,7 @@ function verifyPackagedRuntimeDependencies(os, arch) {
 
 async function main() {
   const { os, arch, skipPrepare, skipBuild, dryRun } = parseArgs(process.argv.slice(2));
+  const linuxTargets = resolveLinuxBuilderTargets({ os });
   const buildArgs = [
     "exec",
     "electron-builder",
@@ -710,9 +714,15 @@ async function main() {
     "electron-builder.config.js",
     osBuilderFlagMap[os],
     archBuilderFlagMap[arch],
+    // electron-builder 的 target 位置参数紧跟平台/架构参数。
+    // 不覆盖时保持原样，避免改变既有命令与日志。
+    ...(linuxTargets ?? []),
   ];
 
   console.log(`[bundle] target=${os}/${arch}`);
+  if (linuxTargets) {
+    console.log(`[bundle] linux targets override=${linuxTargets.join(",")}`);
+  }
   console.log(`[bundle] skipPrepare=${skipPrepare} skipBuild=${skipBuild}`);
 
   const buildEnv = {

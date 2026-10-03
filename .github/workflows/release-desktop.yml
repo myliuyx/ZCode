@@ -1,0 +1,147 @@
+name: Release Desktop
+
+# 手动触发的桌面安装包构建：macOS / Windows / Linux 三平台并行出包。
+#
+# 只产出构建产物并上传为 Actions artifact，不发布 Release：
+# electron-builder.config.js 的 publish.url 在开源仓库里是占位地址
+# （http://localhost:8081），自动更新链路在 fork 里不可用，
+# 强行发 Release 只会产出指向死链的安装包。
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "构建分支或 tag（留空使用当前分支）"
+        required: false
+        type: string
+      preview_identity:
+        description: "以 ZCode Preview 身份出包（连接生产后端）"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  # 同一分支不允许并发构建：产物共用 packages/desktop/dist，矩阵并行会互相覆盖。
+  group: release-desktop-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS arm64
+            os: macos-14
+            target_os: mac
+            target_arch: arm64
+            artifact: zcode-darwin-arm64
+          - name: Windows x64
+            os: windows-2022
+            target_os: win
+            target_arch: x64
+            artifact: zcode-win32-x64
+          - name: Linux x64
+            # 钉住 22.04 而不是 ubuntu-latest（24.04）：
+            # 24.04 的 AppImage 需要手动装 libfuse2，且各版本 glibc 差异会让产物兼容性变差。
+            os: ubuntu-22.04
+            target_os: linux
+            target_arch: x64
+            artifact: zcode-linux-x64
+
+    env:
+      # 与 mise.toml 保持一致；workflow 里的版本升级必须同时更新 mise.toml。
+      NODE_VERSION: "24.14.0"
+      PNPM_VERSION: "10.33.2"
+      COREPACK_ENABLE_PROJECT_SPEC: "0"
+      # Electron runtime 下载走国内镜像。bundle.mjs 会把它收敛成 electron-builder
+      # 专用配置，避免 @electron/get 的全局变量污染 dmg-builder 等辅助包。
+      ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+      # 桌面安装包不引用 packages/desktop/mock-cdn，跳过远程资源准备可省约 20 分钟，
+      # 同时避免脚本回退去读内网依赖源地址。
+      ZCODE_SKIP_REMOTE_ASSETS: "1"
+      ZCODE_ENV: test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          # third-party/upstream 与 native-search 归档按字节校验 sha256，
+          # git 的 autocrlf 转换会破坏校验，必须保持原样。
+          lfs: true
+
+      - name: Resolve Node version
+        id: node
+        shell: bash
+        run: echo "version=${NODE_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.node.outputs.version }}
+          cache: pnpm
+
+      - name: Cache turbo
+        uses: actions/cache@v4
+        with:
+          path: |
+            apps/zcode-cli/node_modules/.cache/turbo
+            packages/desktop/node_modules/.cache/turbo
+            node_modules/.cache/turbo
+          key: turbo-${{ runner.os }}-${{ matrix.target_arch }}-${{ hashFiles('turbo.json', 'apps/zcode-cli/turbo.json') }}
+          restore-keys: |
+            turbo-${{ runner.os }}-${{ matrix.target_arch }}-
+
+      # Linux 需要补齐 AppImage 运行库和 deb 打包工具。
+      # electron-builder 的 rpm 目标需要 rpmbuild，pacman 需要对应工具，
+      # Ubuntu runner 都没有，因此下面通过 ZCODE_DESKTOP_LINUX_TARGETS 收窄 target。
+      # node-pty 自带 darwin/win32 预编译产物（安装时跳过 electron-rebuild），
+      # Linux 侧由 @lydell/node-pty-linux-x64 提供，并已列入 pnpm-workspace allowBuilds，
+      # 因此无需额外的编译工具链。
+      - name: Install Linux packaging dependencies
+        if: matrix.target_os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfuse2 \
+            libssl-dev \
+            dpkg \
+            fakeroot
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build installer
+        shell: bash
+        env:
+          ZCODE_PREVIEW_IDENTITY: ${{ inputs.preview_identity && '1' || '0' }}
+          ZCODE_DESKTOP_LINUX_TARGETS: ${{ matrix.target_os == 'linux' && 'AppImage,deb' || '' }}
+        run: |
+          pnpm bundle:desktop -- --os "${{ matrix.target_os }}" --arch "${{ matrix.target_arch }}"
+
+      # electron-builder 把产物和 unpacked 目录一起放在 dist 下。
+      # 只上传真正的安装包，排除 intermediate/ 里的中间产物。
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            packages/desktop/dist/*.dmg
+            packages/desktop/dist/*.zip
+            packages/desktop/dist/*.exe
+            packages/desktop/dist/*.AppImage
+            packages/desktop/dist/*.deb
