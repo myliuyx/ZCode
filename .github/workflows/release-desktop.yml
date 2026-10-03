@@ -8,17 +8,9 @@ name: Release Desktop
 # 强行发 Release 只会产出指向死链的安装包。
 
 on:
+  # 只保留手动触发：产物是完整安装包，自动 push 触发没有对应场景，
+  # 也会把 fork 里的 Actions 额度消耗在无意义的重复构建上。
   workflow_dispatch:
-    inputs:
-      ref:
-        description: "构建分支或 tag（留空使用当前分支）"
-        required: false
-        type: string
-      preview_identity:
-        description: "以 ZCode Preview 身份出包（连接生产后端）"
-        required: false
-        type: boolean
-        default: false
 
 concurrency:
   # 同一分支不允许并发构建：产物共用 packages/desktop/dist，矩阵并行会互相覆盖。
@@ -72,10 +64,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref || github.ref }}
-          # third-party/upstream 与 native-search 归档按字节校验 sha256，
-          # git 的 autocrlf 转换会破坏校验，必须保持原样。
-          lfs: true
+          # 不开 lfs：本仓库的 third-party/native-search 归档以普通 git blob 存储
+          # （.gitattributes 没有 filter=lfs），开 lfs 只会多一次无用的 git lfs 调用。
+          # third-party 原文的字节保真由 .gitattributes 的 -text 保证，与 LFS 无关。
+          ref: ${{ github.sha }}
 
       - name: Resolve Node version
         id: node
@@ -126,7 +118,9 @@ jobs:
       - name: Build installer
         shell: bash
         env:
-          ZCODE_PREVIEW_IDENTITY: ${{ inputs.preview_identity && '1' || '0' }}
+          # 仅 ZCODE_PREVIEW_IDENTITY=1 时用 Preview 身份；
+          # 留空时 resolveDesktopProductFlavor 会把 test 环境归为 Preview。
+          ZCODE_PREVIEW_IDENTITY: ${{ vars.ZCODE_PREVIEW_IDENTITY }}
           ZCODE_DESKTOP_LINUX_TARGETS: ${{ matrix.target_os == 'linux' && 'AppImage,deb' || '' }}
         run: |
           pnpm bundle:desktop -- --os "${{ matrix.target_os }}" --arch "${{ matrix.target_arch }}"
